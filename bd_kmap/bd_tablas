@@ -1,0 +1,495 @@
+-- ============================================================
+-- BASE DE DATOS KMAP - BIT ACADEMY
+-- ============================================================
+
+CREATE DATABASE IF NOT EXISTS kmap
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+
+USE kmap;
+
+SET SESSION sql_mode = 'STRICT_TRANS_TABLES,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+
+-- ------------------------------------------------------------
+-- LIMPIEZA (Por si se vuelve a ejecutar)
+-- ------------------------------------------------------------
+DROP TABLE IF EXISTS auditoria;
+DROP TABLE IF EXISTS mensajes;
+DROP TABLE IF EXISTS conversacion_participantes;
+DROP TABLE IF EXISTS conversaciones;
+DROP TABLE IF EXISTS ruta_items;
+DROP TABLE IF EXISTS rutas;
+DROP TABLE IF EXISTS brechas;
+DROP TABLE IF EXISTS dominio_historial;
+DROP TABLE IF EXISTS dominio_actual;
+DROP TABLE IF EXISTS respuestas;
+DROP TABLE IF EXISTS diagnosticos;
+DROP TABLE IF EXISTS opciones;
+DROP TABLE IF EXISTS preguntas;
+DROP TABLE IF EXISTS prerrequisitos;
+DROP TABLE IF EXISTS temas;
+DROP TABLE IF EXISTS usuarios_insignias;
+DROP TABLE IF EXISTS insignias;
+DROP TABLE IF EXISTS asignaturas; -- CAMBIO: antes era materias
+DROP TABLE IF EXISTS usuarios;
+
+-- ============================================================
+-- 1. USUARIOS (Con Gamificación)
+-- ============================================================
+CREATE TABLE usuarios (
+    id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    nombre            VARCHAR(120)    NOT NULL,
+    email             VARCHAR(254)    NOT NULL,
+    email_normalizado VARCHAR(254)    NOT NULL,
+    password_hash     VARCHAR(255)    NOT NULL,
+    rol               ENUM('docente','estudiante' /*,'admin'*/) NOT NULL,
+    avatar_url        VARCHAR(500)    NULL, -- Para la foto de perfil
+    xp_actual         INT UNSIGNED    NOT NULL DEFAULT 0, -- Puntos de experiencia
+    nivel             INT UNSIGNED    NOT NULL DEFAULT 1, -- Nivel actual
+    activo            TINYINT(1)      NOT NULL DEFAULT 1,
+    creado_en         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    actualizado_en    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_usuarios_email_norm (email_normalizado),
+    KEY idx_usuarios_rol (rol),
+    KEY idx_usuarios_activo (activo),
+    KEY idx_usuarios_ranking (xp_actual DESC), -- Índice para el Leaderboard
+    CONSTRAINT chk_usuarios_nombre  CHECK (CHAR_LENGTH(nombre) BETWEEN 1 AND 120),
+    CONSTRAINT chk_usuarios_email   CHECK (CHAR_LENGTH(email) <= 254),
+    CONSTRAINT chk_usuarios_hash    CHECK (CHAR_LENGTH(password_hash) BETWEEN 20 AND 255),
+    CONSTRAINT chk_usuarios_activo  CHECK (activo IN (0,1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 2. ASIGNATURAS (Las tarjetas grandes de la pantalla)
+-- ============================================================
+CREATE TABLE asignaturas (
+    id                  BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    nombre              VARCHAR(120)    NOT NULL, -- Ej: Matemáticas
+    codigo              VARCHAR(20)     NULL,     -- Ej: MAT101
+    codigo_normalizado  VARCHAR(20)     NULL,
+    descripcion         VARCHAR(2000)   NULL,     -- Ej: Refuerza tus conocimientos
+    docente_id          BIGINT UNSIGNED NOT NULL,
+    icono_url           VARCHAR(500)    NULL,     -- Para el icono de la tarjeta
+    progreso_porcentaje INT UNSIGNED    NOT NULL DEFAULT 0, -- Para la barra (ej. 70%)
+    color_tema          VARCHAR(20)     NULL,     -- Ej: #00e5ff (Cian)
+    activa              TINYINT(1)      NOT NULL DEFAULT 1,
+    creado_en           DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_asignaturas_codigo_norm (codigo_normalizado),
+    KEY idx_asignaturas_docente (docente_id),
+    KEY idx_asignaturas_activa  (activa),
+    CONSTRAINT fk_asignaturas_docente FOREIGN KEY (docente_id)
+        REFERENCES usuarios(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+    CONSTRAINT chk_asignaturas_nombre CHECK (CHAR_LENGTH(nombre) BETWEEN 1 AND 120),
+    CONSTRAINT chk_asignaturas_progreso CHECK (progreso_porcentaje BETWEEN 0 AND 100)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 3. TEMAS (El grafo de conocimiento)
+-- ============================================================
+CREATE TABLE temas (
+    id                 BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    asignatura_id      BIGINT UNSIGNED NOT NULL, -- CAMBIO: Apunta a asignaturas
+    nombre             VARCHAR(160)    NOT NULL,
+    nombre_normalizado VARCHAR(160)    NOT NULL,
+    descripcion        VARCHAR(2000)   NULL,
+    umbral_dominio     DECIMAL(4,3)    NOT NULL DEFAULT 0.800,
+    peso               DECIMAL(5,2)    NOT NULL DEFAULT 1.00,
+    activo             TINYINT(1)      NOT NULL DEFAULT 1,
+    creado_en          DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_temas_asignatura_nombre (asignatura_id, nombre_normalizado),
+    KEY idx_temas_asignatura (asignatura_id),
+    KEY idx_temas_activo  (activo),
+    CONSTRAINT fk_temas_asignatura FOREIGN KEY (asignatura_id)
+        REFERENCES asignaturas(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT chk_temas_nombre  CHECK (CHAR_LENGTH(nombre) BETWEEN 1 AND 160),
+    CONSTRAINT chk_temas_umbral  CHECK (umbral_dominio BETWEEN 0.0 AND 1.0),
+    CONSTRAINT chk_temas_peso    CHECK (peso > 0 AND peso <= 100),
+    CONSTRAINT chk_temas_activo  CHECK (activo IN (0,1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 4. PRERREQUISITOS (Grafo)
+-- ============================================================
+CREATE TABLE prerrequisitos (
+    id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tema_id          BIGINT UNSIGNED NOT NULL,
+    prerrequisito_id BIGINT UNSIGNED NOT NULL,
+    fuerza           DECIMAL(4,3)    NOT NULL DEFAULT 1.000,
+    creado_por       BIGINT UNSIGNED NULL,
+    creado_en        DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_prerreq_par (tema_id, prerrequisito_id),
+    KEY idx_prerreq_tema   (tema_id),
+    KEY idx_prerreq_prereq (prerrequisito_id),
+    CONSTRAINT fk_prerreq_tema  FOREIGN KEY (tema_id)
+        REFERENCES temas(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_prerreq_prereq FOREIGN KEY (prerrequisito_id)
+        REFERENCES temas(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_prerreq_creado_por FOREIGN KEY (creado_por)
+        REFERENCES usuarios(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT chk_prerreq_no_auto CHECK (tema_id <> prerrequisito_id),
+    CONSTRAINT chk_prerreq_fuerza  CHECK (fuerza > 0 AND fuerza <= 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 5. PREGUNTAS
+-- ============================================================
+CREATE TABLE preguntas (
+    id                   BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    tema_id              BIGINT UNSIGNED NOT NULL,
+    enunciado            VARCHAR(5000)   NOT NULL,
+    tipo                 ENUM('multiple','verdadero_falso','abierta') NOT NULL DEFAULT 'multiple',
+    dificultad_manual    DECIMAL(4,3)    NOT NULL DEFAULT 0.500,
+    dificultad_calibrada DECIMAL(4,3)    NULL,
+    discriminacion       DECIMAL(4,3)    NULL,
+    activa               TINYINT(1)      NOT NULL DEFAULT 1,
+    creado_por           BIGINT UNSIGNED NULL,
+    creado_en            DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    actualizado_en       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_preguntas_tema   (tema_id),
+    KEY idx_preguntas_activa (activa),
+    CONSTRAINT fk_preguntas_tema FOREIGN KEY (tema_id)
+        REFERENCES temas(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_preguntas_creado_por FOREIGN KEY (creado_por)
+        REFERENCES usuarios(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT chk_preguntas_enum CHECK (CHAR_LENGTH(enunciado) BETWEEN 5 AND 5000),
+    CONSTRAINT chk_preguntas_dif  CHECK (dificultad_manual BETWEEN 0 AND 1),
+    CONSTRAINT chk_preguntas_difc CHECK (dificultad_calibrada IS NULL OR dificultad_calibrada BETWEEN 0 AND 1),
+    CONSTRAINT chk_preguntas_disc CHECK (discriminacion IS NULL OR discriminacion BETWEEN -1 AND 1),
+    CONSTRAINT chk_preguntas_act  CHECK (activa IN (0,1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 6. OPCIONES
+-- ============================================================
+CREATE TABLE opciones (
+    id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    pregunta_id BIGINT UNSIGNED NOT NULL,
+    texto       VARCHAR(1000)   NOT NULL,
+    es_correcta TINYINT(1)      NOT NULL DEFAULT 0,
+    orden       INT UNSIGNED    NOT NULL DEFAULT 0,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_opciones_pregunta_orden (pregunta_id, orden),
+    KEY idx_opciones_pregunta (pregunta_id),
+    CONSTRAINT fk_opciones_pregunta FOREIGN KEY (pregunta_id)
+        REFERENCES preguntas(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT chk_opciones_texto   CHECK (CHAR_LENGTH(texto) BETWEEN 1 AND 1000),
+    CONSTRAINT chk_opciones_correcta CHECK (es_correcta IN (0,1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 7. DIAGNÓSTICOS
+-- ============================================================
+CREATE TABLE diagnosticos (
+    id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    estudiante_id    BIGINT UNSIGNED NOT NULL,
+    asignatura_id    BIGINT UNSIGNED NOT NULL, -- CAMBIO: Apunta a asignaturas
+    version_grafo    VARCHAR(40)     NOT NULL DEFAULT 'v1.0',
+    estado           ENUM('en_curso','completado','abandonado','error') NOT NULL DEFAULT 'en_curso',
+    idempotency_key  CHAR(36)        NOT NULL,
+    iniciado_en      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finalizado_en    DATETIME        NULL,
+    confianza_global DECIMAL(4,3)    NULL,
+    resultado_json   JSON            NULL,
+    creado_en        DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_diag_idempotency (idempotency_key),
+    KEY idx_diag_estudiante (estudiante_id),
+    KEY idx_diag_asignatura (asignatura_id),
+    KEY idx_diag_estado     (estado),
+    CONSTRAINT fk_diag_estudiante FOREIGN KEY (estudiante_id)
+        REFERENCES usuarios(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_diag_asignatura FOREIGN KEY (asignatura_id)
+        REFERENCES asignaturas(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT chk_diag_version  CHECK (CHAR_LENGTH(version_grafo) <= 40),
+    CONSTRAINT chk_diag_conf     CHECK (confianza_global IS NULL OR confianza_global BETWEEN 0 AND 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 8. RESPUESTAS
+-- ============================================================
+CREATE TABLE respuestas (
+    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    diagnostico_id  BIGINT UNSIGNED NOT NULL,
+    pregunta_id     BIGINT UNSIGNED NOT NULL,
+    opcion_id       BIGINT UNSIGNED NULL,
+    respuesta_texto VARCHAR(2000)   NULL,
+    es_correcta     TINYINT(1)      NULL,
+    tiempo_ms       INT UNSIGNED    NULL,
+    orden           INT UNSIGNED    NOT NULL,
+    idempotency_key CHAR(36)        NOT NULL,
+    respondido_en   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_resp_diag_pregunta (diagnostico_id, pregunta_id),
+    UNIQUE KEY uq_resp_idempotency   (idempotency_key),
+    KEY idx_resp_diag     (diagnostico_id),
+    KEY idx_resp_pregunta (pregunta_id),
+    CONSTRAINT fk_resp_diag FOREIGN KEY (diagnostico_id)
+        REFERENCES diagnosticos(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_resp_pregunta FOREIGN KEY (pregunta_id)
+        REFERENCES preguntas(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+    CONSTRAINT fk_resp_opcion FOREIGN KEY (opcion_id)
+        REFERENCES opciones(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT chk_resp_correcta CHECK (es_correcta IS NULL OR es_correcta IN (0,1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 9. DOMINIO ACTUAL
+-- ============================================================
+CREATE TABLE dominio_actual (
+    id                    BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    estudiante_id         BIGINT UNSIGNED NOT NULL,
+    tema_id               BIGINT UNSIGNED NOT NULL,
+    score                 DECIMAL(4,3)    NOT NULL DEFAULT 0.000,
+    confianza             DECIMAL(4,3)    NOT NULL DEFAULT 0.000,
+    num_intentos          INT UNSIGNED    NOT NULL DEFAULT 0,
+    estado                ENUM('sin_evaluar','debil','en_progreso','dominado') NOT NULL DEFAULT 'sin_evaluar',
+    ultimo_diagnostico_id BIGINT UNSIGNED NULL,
+    actualizado_en        DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_dominio_estudiante_tema (estudiante_id, tema_id),
+    KEY idx_dominio_act_est    (estudiante_id),
+    KEY idx_dominio_act_tema   (tema_id),
+    KEY idx_dominio_act_estado (estado),
+    CONSTRAINT fk_dominio_estudiante FOREIGN KEY (estudiante_id)
+        REFERENCES usuarios(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_dominio_tema FOREIGN KEY (tema_id)
+        REFERENCES temas(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_dominio_ult_diag FOREIGN KEY (ultimo_diagnostico_id)
+        REFERENCES diagnosticos(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT chk_dominio_score CHECK (score BETWEEN 0 AND 1),
+    CONSTRAINT chk_dominio_conf  CHECK (confianza BETWEEN 0 AND 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 10. DOMINIO HISTORIAL
+-- ============================================================
+CREATE TABLE dominio_historial (
+    id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    estudiante_id  BIGINT UNSIGNED NOT NULL,
+    tema_id        BIGINT UNSIGNED NOT NULL,
+    diagnostico_id BIGINT UNSIGNED NULL,
+    score          DECIMAL(4,3)    NOT NULL,
+    confianza      DECIMAL(4,3)    NOT NULL,
+    estado         ENUM('sin_evaluar','debil','en_progreso','dominado') NOT NULL,
+    registrado_en  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_dominio_hist_est   (estudiante_id, tema_id),
+    KEY idx_dominio_hist_fecha (registrado_en),
+    CONSTRAINT fk_dominio_hist_est FOREIGN KEY (estudiante_id)
+        REFERENCES usuarios(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_dominio_hist_tema FOREIGN KEY (tema_id)
+        REFERENCES temas(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_dominio_hist_diag FOREIGN KEY (diagnostico_id)
+        REFERENCES diagnosticos(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT chk_dominio_hist_score CHECK (score BETWEEN 0 AND 1),
+    CONSTRAINT chk_dominio_hist_conf  CHECK (confianza BETWEEN 0 AND 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 11. BRECHAS
+-- ============================================================
+CREATE TABLE brechas (
+    id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    diagnostico_id BIGINT UNSIGNED NOT NULL,
+    tema_id        BIGINT UNSIGNED NOT NULL,
+    tema_origen_id BIGINT UNSIGNED NULL,
+    evidencia_json JSON            NULL,
+    confianza      DECIMAL(4,3)    NOT NULL DEFAULT 0.000,
+    profundidad    INT UNSIGNED    NOT NULL DEFAULT 0,
+    tipo           ENUM('raiz','intermedia','sin_evidencia') NOT NULL DEFAULT 'raiz',
+    creado_en      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_brechas_diag_tema (diagnostico_id, tema_id),
+    KEY idx_brechas_diag (diagnostico_id),
+    KEY idx_brechas_tema (tema_id),
+    KEY idx_brechas_tipo (tipo),
+    CONSTRAINT fk_brechas_diag FOREIGN KEY (diagnostico_id)
+        REFERENCES diagnosticos(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_brechas_tema FOREIGN KEY (tema_id)
+        REFERENCES temas(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_brechas_origen FOREIGN KEY (tema_origen_id)
+        REFERENCES temas(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT chk_brechas_conf CHECK (confianza BETWEEN 0 AND 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 12. RUTAS (El "Journey" de la foto)
+-- ============================================================
+CREATE TABLE rutas (
+    id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    estudiante_id  BIGINT UNSIGNED NOT NULL,
+    diagnostico_id BIGINT UNSIGNED NOT NULL,
+    asignatura_id  BIGINT UNSIGNED NOT NULL, -- CAMBIO: Apunta a asignaturas
+    estado         ENUM('activa','completada','abandonada') NOT NULL DEFAULT 'activa',
+    creado_en      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    actualizado_en DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_rutas_estudiante (estudiante_id),
+    KEY idx_rutas_diag       (diagnostico_id),
+    CONSTRAINT fk_rutas_estudiante FOREIGN KEY (estudiante_id)
+        REFERENCES usuarios(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_rutas_diag FOREIGN KEY (diagnostico_id)
+        REFERENCES diagnosticos(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_rutas_asignatura FOREIGN KEY (asignatura_id)
+        REFERENCES asignaturas(id) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+ALTER TABLE rutas
+  ADD COLUMN ruta_activa_flag TINYINT
+    GENERATED ALWAYS AS (CASE WHEN estado = 'activa' THEN 1 ELSE NULL END) STORED,
+  ADD UNIQUE KEY uq_ruta_activa_por_asignatura (estudiante_id, asignatura_id, ruta_activa_flag);
+
+-- ============================================================
+-- 13. RUTA ITEMS (Los nodos del camino)
+-- ============================================================
+CREATE TABLE ruta_items (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    ruta_id       BIGINT UNSIGNED NOT NULL,
+    tema_id       BIGINT UNSIGNED NOT NULL,
+    orden         INT UNSIGNED    NOT NULL,
+    estado        ENUM('pendiente','en_progreso','completado') NOT NULL DEFAULT 'pendiente',
+    completado_en DATETIME        NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_ruta_items_tema  (ruta_id, tema_id),
+    UNIQUE KEY uq_ruta_items_orden (ruta_id, orden),
+    KEY idx_ruta_items_ruta (ruta_id),
+    CONSTRAINT fk_ruta_items_ruta FOREIGN KEY (ruta_id)
+        REFERENCES rutas(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_ruta_items_tema FOREIGN KEY (tema_id)
+        REFERENCES temas(id) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 14. CONVERSACIONES (Mensajería)
+-- ============================================================
+CREATE TABLE conversaciones (
+    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    asunto          VARCHAR(200)    NULL,
+    tipo            ENUM('directa','grupal','sistema') NOT NULL DEFAULT 'directa',
+    asignatura_id   BIGINT UNSIGNED NULL, -- CAMBIO
+    tema_id         BIGINT UNSIGNED NULL,
+    creada_por      BIGINT UNSIGNED NOT NULL,
+    idempotency_key CHAR(36)        NOT NULL,
+    estado          ENUM('activa','archivada','bloqueada') NOT NULL DEFAULT 'activa',
+    creado_en       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    actualizado_en  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_conv_idempotency (idempotency_key),
+    KEY idx_conv_asignatura (asignatura_id),
+    KEY idx_conv_estado  (estado),
+    CONSTRAINT fk_conv_asignatura FOREIGN KEY (asignatura_id)
+        REFERENCES asignaturas(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT fk_conv_tema FOREIGN KEY (tema_id)
+        REFERENCES temas(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT fk_conv_creador FOREIGN KEY (creada_por)
+        REFERENCES usuarios(id) ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 15. CONVERSACIÓN PARTICIPANTES
+-- ============================================================
+CREATE TABLE conversacion_participantes (
+    id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    conversacion_id   BIGINT UNSIGNED NOT NULL,
+    usuario_id        BIGINT UNSIGNED NOT NULL,
+    rol_en_conv       ENUM('miembro','moderador','solo_lectura') NOT NULL DEFAULT 'miembro',
+    ultimo_lectura_en DATETIME        NULL,
+    silenciada        TINYINT(1)      NOT NULL DEFAULT 0,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_conv_part (conversacion_id, usuario_id),
+    KEY idx_conv_part_conv (conversacion_id),
+    KEY idx_conv_part_user (usuario_id),
+    CONSTRAINT fk_conv_part_conv FOREIGN KEY (conversacion_id)
+        REFERENCES conversaciones(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_conv_part_user FOREIGN KEY (usuario_id)
+        REFERENCES usuarios(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT chk_conv_part_silenciada CHECK (silenciada IN (0,1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 16. MENSAJES
+-- ============================================================
+CREATE TABLE mensajes (
+    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    conversacion_id BIGINT UNSIGNED NOT NULL,
+    emisor_id       BIGINT UNSIGNED NOT NULL,
+    responde_a_id   BIGINT UNSIGNED NULL,
+    contenido       VARCHAR(5000)   NOT NULL,
+    contenido_html  MEDIUMTEXT      NULL,
+    tipo            ENUM('texto','sistema','adjunto') NOT NULL DEFAULT 'texto',
+    idempotency_key CHAR(36)        NOT NULL,
+    estado          ENUM('enviado','editado','eliminado','reportado') NOT NULL DEFAULT 'enviado',
+    creado_en       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    editado_en      DATETIME        NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_mensajes_idempotency (idempotency_key),
+    KEY idx_mensajes_conv   (conversacion_id, creado_en),
+    KEY idx_mensajes_emisor (emisor_id),
+    CONSTRAINT fk_mensajes_conv FOREIGN KEY (conversacion_id)
+        REFERENCES conversaciones(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_mensajes_emisor FOREIGN KEY (emisor_id)
+        REFERENCES usuarios(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+    CONSTRAINT fk_mensajes_resp FOREIGN KEY (responde_a_id)
+        REFERENCES mensajes(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT chk_mensajes_contenido CHECK (CHAR_LENGTH(contenido) BETWEEN 1 AND 5000)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 17. INSIGNIAS Y RANKING
+-- ============================================================
+CREATE TABLE insignias (
+    id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    nombre      VARCHAR(100)    NOT NULL, -- Ej: "Maestro del Álgebra"
+    descripcion VARCHAR(500)    NULL,
+    icono_url   VARCHAR(500)    NULL,
+    xp_bonus    INT UNSIGNED    NOT NULL DEFAULT 0, -- XP extra al ganarla
+    PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE usuarios_insignias (
+    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    usuario_id      BIGINT UNSIGNED NOT NULL,
+    insignia_id     BIGINT UNSIGNED NOT NULL,
+    obtenida_en     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_usuario_insignia (usuario_id, insignia_id),
+    CONSTRAINT fk_ui_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT fk_ui_insignia FOREIGN KEY (insignia_id) REFERENCES insignias(id) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 18. AUDITORÍA (Historial inmutable)
+-- ============================================================
+CREATE TABLE auditoria (
+    id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    usuario_id   BIGINT UNSIGNED NULL,
+    accion       ENUM(
+                    'login','logout','crear','actualizar','eliminar',
+                    'leer','exportar','iniciar_diagnostico','responder_pregunta',
+                    'enviar_mensaje','leer_mensaje','ganar_insignia'
+                 ) NOT NULL,
+    entidad      VARCHAR(60)     NOT NULL,
+    entidad_id   BIGINT UNSIGNED NULL,
+    antes_json   JSON            NULL,
+    despues_json JSON            NULL,
+    ip           VARCHAR(45)     NULL,
+    user_agent   VARCHAR(500)    NULL,
+    exito        TINYINT(1)      NOT NULL DEFAULT 1,
+    creado_en    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_aud_usuario (usuario_id),
+    KEY idx_aud_entidad (entidad, entidad_id),
+    KEY idx_aud_fecha   (creado_en),
+    KEY idx_aud_accion  (accion),
+    CONSTRAINT fk_aud_usuario FOREIGN KEY (usuario_id)
+        REFERENCES usuarios(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    CONSTRAINT chk_aud_entidad CHECK (CHAR_LENGTH(entidad) <= 60),
+    CONSTRAINT chk_aud_ip      CHECK (ip IS NULL OR CHAR_LENGTH(ip) <= 45),
+    CONSTRAINT chk_aud_ua      CHECK (user_agent IS NULL OR CHAR_LENGTH(user_agent) <= 500),
+    CONSTRAINT chk_aud_exito   CHECK (exito IN (0,1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

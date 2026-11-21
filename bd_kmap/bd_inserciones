@@ -1,0 +1,244 @@
+-- ============================================================
+-- MKA - Track Educación / BIT ACADEMY
+-- Inserciones (datos semilla) adaptadas
+-- Base de datos: kmap
+-- Compatible: MySQL 5.7+, MySQL 8.x, MariaDB 10.x
+-- ============================================================
+
+USE kmap;
+
+SET NAMES utf8mb4;
+SET SESSION sql_mode = 'STRICT_TRANS_TABLES,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+
+-- ------------------------------------------------------------
+-- Limpieza idempotente (permite re-ejecutar el script)
+-- ------------------------------------------------------------
+SET FOREIGN_KEY_CHECKS = 0;
+
+TRUNCATE TABLE auditoria;
+TRUNCATE TABLE usuarios_insignias;
+TRUNCATE TABLE insignias;
+TRUNCATE TABLE mensajes;
+TRUNCATE TABLE conversacion_participantes;
+TRUNCATE TABLE conversaciones;
+TRUNCATE TABLE ruta_items;
+TRUNCATE TABLE rutas;
+TRUNCATE TABLE brechas;
+TRUNCATE TABLE dominio_historial;
+TRUNCATE TABLE dominio_actual;
+TRUNCATE TABLE respuestas;
+TRUNCATE TABLE diagnosticos;
+TRUNCATE TABLE opciones;
+TRUNCATE TABLE preguntas;
+TRUNCATE TABLE prerrequisitos;
+TRUNCATE TABLE temas;
+TRUNCATE TABLE asignaturas; -- Cambiado de materias a asignaturas
+TRUNCATE TABLE usuarios;
+
+SET FOREIGN_KEY_CHECKS = 1;
+
+-- ------------------------------------------------------------
+-- Transacción: todo o nada
+-- ------------------------------------------------------------
+START TRANSACTION;
+
+-- ============================================================
+-- USUARIOS (Con gamificación: XP, Nivel, Avatar)
+-- IDs: 1 = Docente, 2 = Estudiante Demo, 3 = Estudiante Dos
+-- ============================================================
+INSERT INTO usuarios (nombre, email, email_normalizado, password_hash, rol, xp_actual, nivel, avatar_url) VALUES
+('Docente Demo',    'docente@demo.com',     'docente@demo.com',     'hash_demo_0000000000000000000000', 'docente',    0, 1, 'https://api.dicebear.com/7.x/bottts/svg?seed=docente'),
+('Estudiante Demo', 'estudiante@demo.com',  'estudiante@demo.com',  'hash_demo_0000000000000000000000', 'estudiante', 750, 8, 'https://api.dicebear.com/7.x/bottts/svg?seed=estudiante'),
+('Estudiante Dos',  'estudiante2@demo.com', 'estudiante2@demo.com', 'hash_demo_0000000000000000000000', 'estudiante', 120, 2, 'https://api.dicebear.com/7.x/bottts/svg?seed=estudiante2');
+
+-- ============================================================
+-- ASIGNATURAS (Las tarjetas de la pantalla de inicio)
+-- IDs: 1 = Cálculo I, 2 = Programación, 3 = Ciencias
+-- ============================================================
+INSERT INTO asignaturas (nombre, codigo, codigo_normalizado, descripcion, docente_id, progreso_porcentaje, icono_url, color_tema) VALUES
+('Cálculo I',     'CALC1', 'CALC1', 'Refuerza tus conocimientos matemáticos.', 1, 40, 'https://api.dicebear.com/7.x/icons/svg?seed=math', '#00e5ff'),
+('Programación',  'PROG1', 'PROG1', 'Aprende a programar desde cero.',         1, 70, 'https://api.dicebear.com/7.x/icons/svg?seed=code', '#00e5ff'),
+('Ciencias',      'CIEN1', 'CIEN1', 'Explora el mundo de la ciencia.',         1, 0,  'https://api.dicebear.com/7.x/icons/svg?seed=science', '#00e5ff');
+
+-- ============================================================
+-- INSIGNIAS (Para el perfil y el "Zanark Club")
+-- ============================================================
+INSERT INTO insignias (nombre, descripcion, icono_url, xp_bonus) VALUES
+('Primer Paso', 'Completa tu primer diagnóstico', 'https://api.dicebear.com/7.x/icons/svg?seed=star', 50),
+('Maestro del Álgebra', 'Domina el tema de Álgebra', 'https://api.dicebear.com/7.x/icons/svg?seed=trophy', 100);
+
+-- Otorgar insignia al estudiante demo
+INSERT INTO usuarios_insignias (usuario_id, insignia_id) VALUES
+(2, 1),
+(2, 2);
+
+-- ============================================================
+-- TEMAS (El grafo de conocimiento de Cálculo I)
+-- IDs: 1=Aritmética, 2=Álgebra, 3=Ecuaciones, 4=Límites, 5=Derivadas
+-- ============================================================
+INSERT INTO temas (asignatura_id, nombre, nombre_normalizado, descripcion, umbral_dominio) VALUES
+(1, 'Aritmética', 'aritmética', 'Operaciones básicas y fracciones',        0.800),
+(1, 'Álgebra',    'álgebra',    'Expresiones algebraicas y factorización', 0.800),
+(1, 'Ecuaciones', 'ecuaciones', 'Ecuaciones lineales y cuadráticas',       0.800),
+(1, 'Límites',    'límites',    'Concepto y cálculo de límites',           0.800),
+(1, 'Derivadas',  'derivadas',  'Reglas de derivación',                    0.800);
+
+-- ============================================================
+-- PRERREQUISITOS (cadena lineal)
+-- ============================================================
+INSERT INTO prerrequisitos (tema_id, prerrequisito_id, fuerza, creado_por) VALUES
+(2, 1, 1.000, 1),
+(3, 2, 1.000, 1),
+(4, 3, 1.000, 1),
+(5, 4, 1.000, 1);
+
+-- ============================================================
+-- PREGUNTAS
+-- ============================================================
+INSERT INTO preguntas (tema_id, enunciado, tipo, dificultad_manual, creado_por) VALUES
+(1, '¿Cuánto es 7 × 8?',                              'multiple', 0.200, 1),
+(2, 'Factoriza x² - 5x + 6',                           'multiple', 0.500, 1),
+(3, 'Resuelve 2x + 3 = 11',                            'multiple', 0.400, 1),
+(4, '¿Cuál es el límite de (x²-1)/(x-1) cuando x→1?',  'multiple', 0.600, 1),
+(5, 'Deriva f(x) = x³ + 2x',                           'multiple', 0.700, 1);
+
+-- ============================================================
+-- OPCIONES
+-- ============================================================
+INSERT INTO opciones (pregunta_id, texto, es_correcta, orden) VALUES
+-- Pregunta 1 (Aritmética) IDs 1-4
+(1, '54', 0, 0),
+(1, '56', 1, 1),
+(1, '64', 0, 2),
+(1, '48', 0, 3),
+-- Pregunta 2 (Álgebra) IDs 5-8
+(2, '(x-2)(x-3)', 1, 0),
+(2, '(x+2)(x+3)', 0, 1),
+(2, '(x-1)(x-6)', 0, 2),
+(2, '(x+1)(x+6)', 0, 3),
+-- Pregunta 3 (Ecuaciones) IDs 9-12
+(3, 'x = 4', 1, 0),
+(3, 'x = 7', 0, 1),
+(3, 'x = 5', 0, 2),
+(3, 'x = 8', 0, 3),
+-- Pregunta 4 (Límites) IDs 13-16
+(4, '2', 1, 0),
+(4, '1', 0, 1),
+(4, '0', 0, 2),
+(4, '∞', 0, 3),
+-- Pregunta 5 (Derivadas) IDs 17-20
+(5, '3x² + 2', 1, 0),
+(5, '3x²',     0, 1),
+(5, 'x² + 2',  0, 2),
+(5, '3x + 2',  0, 3);
+
+-- ============================================================
+-- DIAGNÓSTICO DE EJEMPLO (Estudiante Demo, Cálculo I)
+-- Usamos idempotency_key de 36 caracteres válidos
+-- ============================================================
+INSERT INTO diagnosticos
+(estudiante_id, asignatura_id, version_grafo, estado, idempotency_key, confianza_global, resultado_json) VALUES
+(2, 1, 'v1.0', 'completado', 'd1111111-1111-1111-1111-111111111111', 0.820,
+ JSON_OBJECT(
+    'nodos_raiz', JSON_ARRAY(2),
+    'confianza', 0.82,
+    'explicacion', 'El bloqueo en Derivadas proviene de Álgebra'
+ ));
+
+-- ============================================================
+-- RESPUESTAS DEL DIAGNÓSTICO
+-- ============================================================
+INSERT INTO respuestas
+(diagnostico_id, pregunta_id, opcion_id, es_correcta, tiempo_ms, orden, idempotency_key) VALUES
+(1, 5, 18, 0, 42000, 0, 'r1111111-1111-1111-1111-111111111101'),
+(1, 4, 13, 1, 35000, 1, 'r1111111-1111-1111-1111-111111111102'),
+(1, 3,  9, 1, 28000, 2, 'r1111111-1111-1111-1111-111111111103'),
+(1, 2,  5, 0, 31000, 3, 'r1111111-1111-1111-1111-111111111104'),
+(1, 1,  2, 1, 15000, 4, 'r1111111-1111-1111-1111-111111111105');
+
+-- ============================================================
+-- BRECHAS (Tema raíz: Álgebra, origen: Derivadas)
+-- ============================================================
+INSERT INTO brechas
+(diagnostico_id, tema_id, tema_origen_id, confianza, profundidad, tipo, evidencia_json) VALUES
+(1, 2, 5, 0.820, 2, 'raiz',
+ JSON_OBJECT(
+    'preguntas', JSON_ARRAY(2),
+    'aciertos', 0,
+    'fallos', 1
+ ));
+
+-- ============================================================
+-- DOMINIO ACTUAL
+-- ============================================================
+INSERT INTO dominio_actual
+(estudiante_id, tema_id, score, confianza, num_intentos, estado, ultimo_diagnostico_id) VALUES
+(2, 1, 0.900, 0.700, 1, 'dominado',    1),
+(2, 2, 0.300, 0.650, 1, 'debil',       1),
+(2, 3, 0.750, 0.600, 1, 'en_progreso', 1),
+(2, 4, 0.850, 0.650, 1, 'dominado',    1),
+(2, 5, 0.400, 0.600, 1, 'debil',       1);
+
+-- ============================================================
+-- RUTA (El "Journey")
+-- ============================================================
+INSERT INTO rutas (estudiante_id, diagnostico_id, asignatura_id, estado) VALUES
+(2, 1, 1, 'activa');
+
+INSERT INTO ruta_items (ruta_id, tema_id, orden, estado) VALUES
+(1, 2, 0, 'en_progreso'),
+(1, 3, 1, 'pendiente'),
+(1, 5, 2, 'pendiente');
+
+-- ============================================================
+-- CONVERSACIÓN Y MENSAJES
+-- ============================================================
+INSERT INTO conversaciones (asunto, tipo, asignatura_id, tema_id, creada_por, idempotency_key) VALUES
+('Refuerzo de Álgebra', 'directa', 1, 2, 1, 'c1111111-1111-1111-1111-111111111111');
+
+INSERT INTO conversacion_participantes (conversacion_id, usuario_id, rol_en_conv) VALUES
+(1, 1, 'miembro'),
+(1, 2, 'miembro');
+
+INSERT INTO mensajes (conversacion_id, emisor_id, contenido, idempotency_key) VALUES
+(1, 1, 'Hola, revisé tu diagnóstico y veo que Álgebra es la base a reforzar.', 'm1111111-1111-1111-1111-111111111111'),
+(1, 2, 'Gracias, ya empecé con la ruta de recuperación.',                       'm2222222-2222-2222-2222-222222222222');
+
+-- ============================================================
+-- AUDITORÍA
+-- ============================================================
+INSERT INTO auditoria (usuario_id, accion, entidad, entidad_id, exito) VALUES
+(2, 'iniciar_diagnostico', 'diagnosticos', 1, 1),
+(2, 'responder_pregunta',  'respuestas',   1, 1),
+(1, 'enviar_mensaje',      'mensajes',     1, 1),
+(2, 'enviar_mensaje',      'mensajes',     2, 1);
+
+COMMIT;
+
+-- ============================================================
+-- VERIFICACIÓN
+-- ============================================================
+USE kmap;
+
+SELECT 'usuarios'   AS tabla, COUNT(*) AS filas FROM usuarios
+UNION ALL SELECT 'asignaturas', COUNT(*) FROM asignaturas
+UNION ALL SELECT 'insignias',   COUNT(*) FROM insignias
+UNION ALL SELECT 'usuarios_insignias', COUNT(*) FROM usuarios_insignias
+UNION ALL SELECT 'temas',      COUNT(*) FROM temas
+UNION ALL SELECT 'prerrequisitos', COUNT(*) FROM prerrequisitos
+UNION ALL SELECT 'preguntas',  COUNT(*) FROM preguntas
+UNION ALL SELECT 'opciones',   COUNT(*) FROM opciones
+UNION ALL SELECT 'diagnosticos', COUNT(*) FROM diagnosticos
+UNION ALL SELECT 'respuestas', COUNT(*) FROM respuestas
+UNION ALL SELECT 'brechas',    COUNT(*) FROM brechas
+UNION ALL SELECT 'dominio_actual', COUNT(*) FROM dominio_actual
+UNION ALL SELECT 'dominio_historial', COUNT(*) FROM dominio_historial
+UNION ALL SELECT 'rutas',      COUNT(*) FROM rutas
+UNION ALL SELECT 'ruta_items', COUNT(*) FROM ruta_items
+UNION ALL SELECT 'conversaciones', COUNT(*) FROM conversaciones
+UNION ALL SELECT 'conversacion_participantes', COUNT(*) FROM conversacion_participantes
+UNION ALL SELECT 'mensajes',   COUNT(*) FROM mensajes
+UNION ALL SELECT 'auditoria',  COUNT(*) FROM auditoria;
+
+-- Prueba del Leaderboard (Ranking)
+SELECT nombre, nivel, xp_actual FROM usuarios ORDER BY xp_actual DESC;

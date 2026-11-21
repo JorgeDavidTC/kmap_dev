@@ -1,0 +1,272 @@
+USE kmap;
+
+DROP TRIGGER IF EXISTS trg_prerreq_no_ciclo_directo_ins;
+DROP TRIGGER IF EXISTS trg_prerreq_no_ciclo_directo_upd;
+DROP TRIGGER IF EXISTS trg_opcion_max_una_correcta_ins;
+DROP TRIGGER IF EXISTS trg_opcion_max_una_correcta_upd;
+DROP TRIGGER IF EXISTS trg_pregunta_activa_requiere_correcta;
+DROP TRIGGER IF EXISTS trg_dominio_historial_ins;
+DROP TRIGGER IF EXISTS trg_dominio_historial_upd;
+DROP TRIGGER IF EXISTS trg_mensaje_emisor_participante;
+DROP TRIGGER IF EXISTS trg_mensaje_respuesta_misma_conv;
+DROP TRIGGER IF EXISTS trg_auditoria_no_update;
+DROP TRIGGER IF EXISTS trg_auditoria_no_delete;
+DROP TRIGGER IF EXISTS trg_mensajes_editado_en;
+DROP PROCEDURE IF EXISTS sp_validar_prerrequisito;
+
+-- ============================================================
+-- BLOQUE 1: TRIGGERS Y PROCEDIMIENTO
+-- ============================================================
+DELIMITER $$
+
+-- ------------------------------------------------------------
+-- A. GRAFO DE PRERREQUISITOS
+-- ------------------------------------------------------------
+
+-- A.1 Ciclo directo al insertar (A -> B y B -> A)
+CREATE TRIGGER trg_prerreq_no_ciclo_directo_ins
+BEFORE INSERT ON prerrequisitos
+FOR EACH ROW
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM prerrequisitos
+        WHERE tema_id = NEW.prerrequisito_id
+          AND prerrequisito_id = NEW.tema_id
+    ) THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Ciclo directo detectado en prerrequisitos';
+    END IF;
+END$$
+
+-- A.2 Ciclo directo al actualizar
+CREATE TRIGGER trg_prerreq_no_ciclo_directo_upd
+BEFORE UPDATE ON prerrequisitos
+FOR EACH ROW
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM prerrequisitos
+        WHERE tema_id = NEW.prerrequisito_id
+          AND prerrequisito_id = NEW.tema_id
+          AND id <> NEW.id
+    ) THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Ciclo directo detectado al actualizar';
+    END IF;
+END$$
+
+-- A.3 Procedimiento: ciclos indirectos (A -> B -> C -> A)
+CREATE PROCEDURE sp_validar_prerrequisito(
+    IN p_tema_id BIGINT UNSIGNED,
+    IN p_prerrequisito_id BIGINT UNSIGNED
+)
+BEGIN
+    DECLARE v_existe_ciclo INT DEFAULT 0;
+
+    -- Autoreferencia
+    IF p_tema_id = p_prerrequisito_id THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Un tema no puede ser prerrequisito de sí mismo';
+    END IF;
+
+    -- Ciclo directo
+    IF EXISTS (
+        SELECT 1 FROM prerrequisitos
+        WHERE tema_id = p_prerrequisito_id
+          AND prerrequisito_id = p_tema_id
+    ) THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Ciclo directo detectado';
+    END IF;
+
+    -- Ciclo indirecto con CTE recursiva (MariaDB 10.2+ / MySQL 8.0+)
+    WITH RECURSIVE alcanzables (id) AS (
+        SELECT p_prerrequisito_id
+        UNION
+        SELECT p.prerrequisito_id
+        FROM prerrequisitos p
+        JOIN alcanzables a ON p.tema_id = a.id
+        WHERE p.tema_id <> p_tema_id
+    )
+    SELECT COUNT(*) INTO v_existe_ciclo
+    FROM alcanzables
+    WHERE id = p_tema_id;
+
+    IF v_existe_ciclo > 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Ciclo indirecto detectado';
+    END IF;
+END$$
+
+-- ------------------------------------------------------------
+-- B. OPCIONES: máximo una correcta + pregunta activa requiere correcta
+-- ------------------------------------------------------------
+
+CREATE TRIGGER trg_opcion_max_una_correcta_ins
+AFTER INSERT ON opciones
+FOR EACH ROW
+BEGIN
+    IF NEW.es_correcta = 1
+       AND (SELECT COUNT(*) FROM opciones
+            WHERE pregunta_id = NEW.pregunta_id AND es_correcta = 1) > 1
+    THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Solo una opción correcta por pregunta';
+    END IF;
+END$$
+
+CREATE TRIGGER trg_opcion_max_una_correcta_upd
+AFTER UPDATE ON opciones
+FOR EACH ROW
+BEGIN
+    IF NEW.es_correcta = 1
+       AND (SELECT COUNT(*) FROM opciones
+            WHERE pregunta_id = NEW.pregunta_id
+              AND es_correcta = 1
+              AND id <> NEW.id) > 0
+    THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Solo una opción correcta por pregunta';
+    END IF;
+END$$
+
+CREATE TRIGGER trg_pregunta_activa_requiere_correcta
+BEFORE UPDATE ON preguntas
+FOR EACH ROW
+BEGIN
+    IF NEW.activa = 1
+       AND NEW.tipo IN ('multiple','verdadero_falso')
+       AND (SELECT COUNT(*) FROM opciones
+            WHERE pregunta_id = NEW.id AND es_correcta = 1) = 0
+    THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'La pregunta no tiene opción correcta';
+    END IF;
+END$$
+
+-- ------------------------------------------------------------
+-- C. DOMINIO: historial automático
+-- ------------------------------------------------------------
+
+CREATE TRIGGER trg_dominio_historial_ins
+AFTER INSERT ON dominio_actual
+FOR EACH ROW
+BEGIN
+    INSERT INTO dominio_historial
+    (estudiante_id, tema_id, diagnostico_id, score, confianza, estado)
+    VALUES
+    (NEW.estudiante_id, NEW.tema_id, NEW.ultimo_diagnostico_id,
+     NEW.score, NEW.confianza, NEW.estado);
+END$$
+
+CREATE TRIGGER trg_dominio_historial_upd
+AFTER UPDATE ON dominio_actual
+FOR EACH ROW
+BEGIN
+    IF OLD.score <> NEW.score
+       OR OLD.confianza <> NEW.confianza
+       OR OLD.estado <> NEW.estado
+    THEN
+        INSERT INTO dominio_historial
+        (estudiante_id, tema_id, diagnostico_id, score, confianza, estado)
+        VALUES
+        (NEW.estudiante_id, NEW.tema_id, NEW.ultimo_diagnostico_id,
+         NEW.score, NEW.confianza, NEW.estado);
+    END IF;
+END$$
+
+-- ------------------------------------------------------------
+-- D. MENSAJERÍA: integridad de emisor y respuesta
+-- ------------------------------------------------------------
+
+CREATE TRIGGER trg_mensaje_emisor_participante
+BEFORE INSERT ON mensajes
+FOR EACH ROW
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM conversacion_participantes
+        WHERE conversacion_id = NEW.conversacion_id
+          AND usuario_id = NEW.emisor_id
+    ) THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'El emisor no es participante de la conversación';
+    END IF;
+END$$
+
+CREATE TRIGGER trg_mensaje_respuesta_misma_conv
+BEFORE INSERT ON mensajes
+FOR EACH ROW
+BEGIN
+    IF NEW.responde_a_id IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1 FROM mensajes
+           WHERE id = NEW.responde_a_id
+             AND conversacion_id = NEW.conversacion_id
+       )
+    THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'El mensaje respondido no pertenece a la misma conversación';
+    END IF;
+END$$
+
+-- ------------------------------------------------------------
+-- E. AUDITORÍA: inmutable
+-- ------------------------------------------------------------
+
+CREATE TRIGGER trg_auditoria_no_update
+BEFORE UPDATE ON auditoria
+FOR EACH ROW
+BEGIN
+    SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'La auditoría es inmutable';
+END$$
+
+CREATE TRIGGER trg_auditoria_no_delete
+BEFORE DELETE ON auditoria
+FOR EACH ROW
+BEGIN
+    SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'La auditoría es inmutable';
+END$$
+
+-- ------------------------------------------------------------
+-- F. MENSAJES: marcar editado_en al cambiar contenido
+-- ------------------------------------------------------------
+
+CREATE TRIGGER trg_mensajes_editado_en
+BEFORE UPDATE ON mensajes
+FOR EACH ROW
+BEGIN
+    IF NEW.contenido <> OLD.contenido THEN
+        SET NEW.editado_en = NOW();
+        SET NEW.estado = 'editado';
+    END IF;
+END$$
+
+DELIMITER ;
+
+-- ============================================================
+-- BLOQUE 2: USUARIOS SQL Y PRIVILEGIOS
+-- ============================================================
+
+-- G.1 App: solo DML, sin DDL, sin FILE, sin SUPER
+CREATE USER IF NOT EXISTS 'mka_app'@'%'
+  IDENTIFIED BY 'CAMBIAR_CLAVE_FUERTE_APP_2024!';
+
+GRANT SELECT, INSERT, UPDATE, DELETE
+  ON kmap.* TO 'mka_app'@'%';
+
+GRANT EXECUTE ON PROCEDURE kmap.sp_validar_prerrequisito TO 'mka_app'@'%';
+
+-- G.2 Reportería: solo lectura
+CREATE USER IF NOT EXISTS 'mka_readonly'@'%'
+  IDENTIFIED BY 'CAMBIAR_CLAVE_FUERTE_READONLY_2024!';
+
+GRANT SELECT ON kmap.* TO 'mka_readonly'@'%';
+
+-- G.3 Migraciones: DDL, solo desde localhost
+CREATE USER IF NOT EXISTS 'mka_migrator'@'localhost'
+  IDENTIFIED BY 'CAMBIAR_CLAVE_FUERTE_MIGRATOR_2024!';
+
+GRANT ALL PRIVILEGES ON kmap.* TO 'mka_migrator'@'localhost';
+
+FLUSH PRIVILEGES;
